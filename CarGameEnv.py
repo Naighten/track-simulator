@@ -16,12 +16,12 @@ class CarGameEnv(gym.Env):
     metadata = {"render_modes": ["human"]}
 
     def __init__(
-        self,
-        track_name: str = "track2",
-        render_mode: str | None = "human",
-        config_path: str = "tracks.json",
-        seed: int = None,
-        reward_config: dict | None = None,
+            self,
+            track_name: str = "newtrack2",
+            render_mode: str | None = "human",
+            config_path: str = "tracks/tracks.json",
+            seed: int = None,
+            reward_config: dict | None = None,
     ):
         super().__init__()
         self.seed(seed) if seed else None
@@ -102,19 +102,26 @@ class CarGameEnv(gym.Env):
         self.step_count = 0
 
         # Пространства действий и наблюдений
-        self.action_space = spaces.Discrete(9)  # 3 throttle x 3 steering
+        self.action_space = spaces.Box(
+            low=np.array([-1.0, -1.0], dtype=np.float32),  # [руль, газ]
+            high=np.array([1.0, 1.0], dtype=np.float32),
+            dtype=np.float32
+        )
         self.observation_space = spaces.Box(
             low=np.array(
-                [0, 0, -360, -self.reward_config["max_speed"]], dtype=np.float32
+                [0, 0, -360, -self.reward_config["max_speed"]] +
+                [0, 0, -1, -1] + [0]*self.game.num_sensors,
+                dtype=np.float32
             ),
             high=np.array(
                 [
                     self.game.WIDTH,
                     self.game.HEIGHT,
                     360,
-                    self.reward_config["max_speed"],
-                ],
-                dtype=np.float32,
+                    self.reward_config["max_speed"]
+                ] +
+                [1, 1, 1, 1] + [1]*self.game.num_sensors,
+                dtype=np.float32
             ),
             dtype=np.float32,
         )
@@ -137,7 +144,7 @@ class CarGameEnv(gym.Env):
         """Рассчитывает максимальную длительность эпизода"""
         cfg = self.reward_config["episode_settings"]
         return (
-            cfg["base_steps"] + len(self.waypoints) * cfg["steps_per_checkpoint"]
+                cfg["base_steps"] + len(self.waypoints) * cfg["steps_per_checkpoint"]
         ) * cfg["max_extension"]
 
     def reset(self, seed=None, options=None):
@@ -162,7 +169,7 @@ class CarGameEnv(gym.Env):
 
         return self._get_obs(x, y), {}
 
-    def step(self, action: int):
+    def step(self, action: np.ndarray):
         """Выполняет один шаг в среде"""
         self.step_count += 1
 
@@ -174,9 +181,17 @@ class CarGameEnv(gym.Env):
         truncated = False
         reward = -self.reward_config["step_penalty"]
 
-        # Применяем действие
-        throttle = action // 3
-        steering = action % 3
+        # Распаковываем и нормализуем действия
+        steering_norm, throttle_norm = action
+
+        # Конвертация в дискретные значения (для обратной совместимости)
+        steering = int((steering_norm + 1) * 1)  # [-1,1] -> [0,2]
+        throttle = int((throttle_norm + 1) * 1)  # [-1,1] -> [0,2]
+
+        # Ограничиваем и преобразуем
+        steering = np.clip(steering, 0, 2)
+        throttle = np.clip(throttle, 0, 2)
+
         self.game.update_physics(steering, throttle)
 
         # Получаем новое состояние
@@ -195,7 +210,7 @@ class CarGameEnv(gym.Env):
         terminated |= self._check_lap_completion()
         terminated |= self._check_out_of_bounds(x, y)
         terminated |= self._check_stuck(speed)
-        truncated = self.step_count >= self.max_episode_steps
+        truncated |= self.step_count >= self.max_episode_steps
 
         self.cumulative_reward += reward
 
@@ -220,16 +235,14 @@ class CarGameEnv(gym.Env):
         return False
 
     def _get_obs(self, x, y):
-        """Формирует наблюдение с нормализацией"""
-        return np.array(
-            [
-                x / self.game.WIDTH,
-                y / self.game.HEIGHT,
-                self.game.car_angle / 360.0,
-                self.game.car_speed / self.reward_config["max_speed"],
-            ],
-            dtype=np.float32,
-        )
+        """Формирует наблюдение с сенсорами"""
+        return np.array([
+            x / self.game.WIDTH,
+            y / self.game.HEIGHT,
+            self.game.car_angle / 360.0,
+            self.game.car_speed / self.game.max_speed,
+            *self.game.sensor_data  # Добавляем данные сенсоров
+        ], dtype=np.float32)
 
     def _calculate_speed_reward(self, speed):
         """Вычисляет награду/штраф за скорость"""
@@ -266,9 +279,9 @@ class CarGameEnv(gym.Env):
         if self.prev_dist is not None:
             delta_dist = self.prev_dist - dist  # Положительное значение = приближение
             proximity_reward = (
-                delta_dist
-                * self.reward_config["proximity_coef"]
-                * (self.next_wp_idx / len(self.waypoints))
+                    delta_dist
+                    * self.reward_config["proximity_coef"]
+                    * (self.next_wp_idx / len(self.waypoints))
             )
 
             # Ограничиваем максимальный бонус/штраф
@@ -326,8 +339,8 @@ class CarGameEnv(gym.Env):
     def _check_stuck(self, speed):
         """Проверка застревания"""
         return (
-            speed < self.reward_config["min_speed"]
-            and self.step_count > self.reward_config["stuck_threshold"]
+                speed < self.reward_config["min_speed"]
+                and self.step_count > self.reward_config["stuck_threshold"]
         )
 
     def _get_info(self):

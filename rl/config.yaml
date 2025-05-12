@@ -1,0 +1,9 @@
+training:
+  episodes: 2000
+  learning_rate: 0.001
+  gamma: 0.99
+  batch_size: 64
+
+model:
+  hidden_units: 128
+  activation: relu

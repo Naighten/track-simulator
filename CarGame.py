@@ -4,7 +4,6 @@ import random
 import time
 
 import pygame
-from sympy.strategies.core import switch
 
 from config import get_config, Config
 
@@ -12,7 +11,7 @@ from config import get_config, Config
 class CarGame:
     _config: Config = get_config()
 
-    def __init__(self, track_name="track2", render_mode="human", seed=None):
+    def __init__(self, track_name="newtrack2", render_mode="human", seed=None):
         self.render_mode = render_mode
 
         # Инициализация генератора случайных чисел для воспроизводимости
@@ -46,7 +45,7 @@ class CarGame:
         self.track_mask = None
 
         # Данные трассы
-        self.track_data = self.load_track_data("tracks.json", track_name)
+        self.track_data = self.load_track_data("tracks/tracks.json", track_name)
         if self.track_data is None:
             raise ValueError(f"Track with name '{track_name}' not found.")
 
@@ -60,7 +59,7 @@ class CarGame:
                 self.default_image = pygame.image.load("car.png").convert_alpha()
                 self.dead_image = pygame.image.load("red_car.png").convert_alpha()
 
-                self.track = pygame.image.load(self.track_data["track_image"]).convert()
+                self.track = pygame.image.load("tracks/" + self.track_data["track_image"]).convert()
             case _:
                 self.screen = None
                 self.font = None
@@ -76,6 +75,12 @@ class CarGame:
         self.A = self.track_data["finish_line"]["A"]
         self.B = self.track_data["finish_line"]["B"]
         self.C = self.track_data["finish_line"]["C"]
+        self.start_coords = {
+            "x_min": self.track_data["start_coords"]["x_min"],
+            "x_max": self.track_data["start_coords"]["x_max"],
+            "y_min": self.track_data["start_coords"]["y_min"],
+            "y_max": self.track_data["start_coords"]["y_max"],
+        }
 
         # Установка начального положения и ориентации машины
         self.car_x = self.track_data["start_position"]["x"]
@@ -90,6 +95,22 @@ class CarGame:
         self.previous_f_result = None
         self.best_lap_time = None
         self.last_valid_lap_time = None
+
+        # Параметры сенсоров
+        self.num_sensors = 8
+        self.sensor_angles = [0, 45, 90, 135, 180, 225, 270, 315]
+        self.sensor_colors = [
+            (255, 0, 0),  # Вперед (0°) - красный
+            (200, 0, 100),  # Вперед-вправо (45°)
+            (150, 0, 150),  # Вправо (90°)
+            (100, 0, 200),  # Назад-вправо (135°)
+            (0, 255, 0),  # Назад (180°) - зеленый
+            (0, 100, 200),  # Назад-влево (225°)
+            (0, 150, 150),  # Влево (270°)
+            (0, 200, 100)  # Вперед-влево (315°)
+        ]
+        self.max_sensor_length = 300
+        self.sensor_data = [0] * self.num_sensors
 
         self.clock = pygame.time.Clock() if self.render_mode == "human" else None
 
@@ -116,6 +137,79 @@ class CarGame:
             if track_name in track:
                 return track[track_name]
         return None
+
+    def cast_ray(self, angle):
+        """Бросает луч под заданным углом и возвращает нормализованное расстояние"""
+        start_x = self.car_x
+        start_y = self.car_y
+        rad = math.radians(self.car_angle + angle)
+
+        max_len = self.max_sensor_length
+        if 135 <= abs(angle) <= 225:
+            max_len *= 0.7  # Укорачиваем задние лучи
+
+        end_x = start_x + math.sin(rad) * max_len
+        end_y = start_y + math.cos(rad) * max_len
+
+        dx = end_x - start_x
+        dy = end_y - start_y
+        steps = max(abs(dx), abs(dy))
+        if steps == 0:
+            return 0.0
+
+        x_inc = dx / steps
+        y_inc = dy / steps
+
+        current_x = start_x
+        current_y = start_y
+        hit_distance = max_len  # По умолчанию максимальная длина
+
+        for _ in range(int(steps)):
+            ix = int(current_x)
+            iy = int(current_y)
+
+            # Проверка выхода за границы
+            if not (0 <= ix < self.WIDTH and 0 <= iy < self.HEIGHT):
+                edge_dist = self._distance_to_edge(start_x, start_y, current_x, current_y)
+                hit_distance = min(hit_distance, edge_dist)
+                break
+
+            # Проверка пересечения с трассой
+            if not self.on_track(ix, iy):
+                dist = math.hypot(current_x - start_x, current_y - start_y)
+                hit_distance = min(hit_distance, dist)
+                break
+
+            current_x += x_inc
+            current_y += y_inc
+
+        return hit_distance / max_len  # Нормализация
+
+    def _distance_to_edge(self, x0, y0, x1, y1):
+        """Вычисляет расстояние до ближайшей границы экрана"""
+        t = 1.0
+        dx = x1 - x0
+        dy = y1 - y0
+
+        if dx != 0:
+            tx1 = (self.WIDTH - 1 - x0) / dx
+            tx2 = -x0 / dx
+            t_x = min(tx1, tx2) if dx > 0 else max(tx1, tx2)
+            t = min(t, t_x)
+
+        if dy != 0:
+            ty1 = (self.HEIGHT - 1 - y0) / dy
+            ty2 = -y0 / dy
+            t_y = min(ty1, ty2) if dy > 0 else max(ty1, ty2)
+            t = min(t, t_y)
+
+        intersection_x = x0 + dx * t
+        intersection_y = y0 + dy * t
+        return math.hypot(intersection_x - x0, intersection_y - y0)
+
+    def update_sensors(self):
+        """Обновляет данные всех сенсоров"""
+        self.sensor_data = [self.cast_ray(angle) for angle in self.sensor_angles]
 
     def update_physics(self, steering: int, throttle: int):
         """Обновление физики машины: steering=0:left,1:straight,2:right; throttle=0:reverse,1:idle,2:forward"""
@@ -152,12 +246,12 @@ class CarGame:
 
         if self.velocity_angle < self.car_angle:
             self.velocity_angle += self.rotation_speed * (
-                1 - self.drift_factor * self.car_speed / self.max_speed
+                    1 - self.drift_factor * self.car_speed / self.max_speed
             )
             self.velocity_angle = max(self.velocity_angle, self.car_angle - 30)
         elif self.velocity_angle > self.car_angle:
             self.velocity_angle -= self.rotation_speed * (
-                1 - self.drift_factor * self.car_speed / self.max_speed
+                    1 - self.drift_factor * self.car_speed / self.max_speed
             )
             self.velocity_angle = min(self.velocity_angle, self.car_angle + 30)
 
@@ -170,6 +264,8 @@ class CarGame:
         self.car_x = max(min(self.car_x, self.WIDTH), 0)
         self.car_y = max(min(self.car_y, self.HEIGHT), 0)
 
+        self.update_sensors()
+
         # Lap and track logic (unchanged)
         f_val = self.A * self.car_x + self.B * self.car_y + self.C
         f_result = -1 if f_val < 0 else 1
@@ -181,7 +277,7 @@ class CarGame:
             if not self.is_invalid_lap:
                 self.car_image = self.default_image
 
-            if self.previous_f_result < f_result and 1331 <= self.car_x <= 1374:
+            if self.previous_f_result < f_result and self.start_coords["x_min"] <= self.car_x <= self.start_coords["x_max"]:
                 self.laps += 1
                 if not self.is_invalid_lap and self.start_time is not None:
                     lap_time = time.perf_counter() - self.start_time
@@ -211,15 +307,18 @@ class CarGame:
             return False
 
         # 2) Финишная полоса (белый) считается частью трассы
-        if 1331 <= x <= 1374 and 390 <= y <= 400:  # TODO: проверка y координаты
+        if (
+                self.start_coords["x_min"] <= x <= self.start_coords["x_max"]
+                and self.start_coords["y_min"] <= y <= self.start_coords["y_max"]
+        ):
             return True
 
         if self.render_mode == "human" and self.screen is not None:
-            pixel = self.screen.get_at((x, y))[:3]
-            return (pixel == self.TRACK_COLOR) or (pixel[1] > 100)
+            pixel = self.screen.get_at((int(x), int(y)))[:3]
+            return pixel == self.TRACK_COLOR or pixel[1] > 100
 
         if self.track_mask is not None:
-            return bool(self.track_mask[y, x])
+            return bool(self.track_mask[int(y), int(x)])
 
     def scale_car_image(self, image, scale):
         if self.render_mode != "human" or image is None:
@@ -251,6 +350,19 @@ class CarGame:
         self.screen.blit(rotated, rect.topleft)
 
         self.display_text()
+
+        # Отрисовка сенсоров с разными цветами
+        for i, (distance, color) in enumerate(zip(self.sensor_data, self.sensor_colors)):
+            angle = self.car_angle + self.sensor_angles[i]
+            rad = math.radians(angle)
+            length = distance * self.max_sensor_length * (
+                0.7 if 135 <= abs(self.sensor_angles[i]) <= 225 else 1.0
+            )
+            end_x = self.car_x + math.sin(rad) * length
+            end_y = self.car_y + math.cos(rad) * length
+            pygame.draw.line(self.screen, color,
+                             (int(self.car_x), int(self.car_y)),
+                             (int(end_x), int(end_y)), 2)
 
         # pygame.display.flip()
 
